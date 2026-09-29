@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Rack Access - Scan Barcode</title>
+  <link rel="stylesheet" href="styles.css" />
+  <style>
+    .scanner-box {
+      background-color: #2a2a2a;
+      padding: 25px;
+      border-radius: 8px;
+      text-align: center;
+      margin-bottom: 20px;
+    }
+    #statusBadge {
+      margin-top: 20px;
+      padding: 25px;
+      border-radius: 8px;
+      font-size: 1.5em;
+      font-weight: bold;
+      display: none;
+      text-align: center;
+    }
+    .granted { background-color: #1b5e20; color: #4caf50; border: 3px solid #4caf50; }
+    .denied { background-color: #b71c1c; color: #ff8a80; border: 3px solid #f44336; }
+  </style>
+</head>
+<body>
+  <nav>
+    <a href="/dashboard">Dashboard</a> |
+    <a href="/scan">Barcode Scanner</a> |
+    <a href="/members">Members</a> |
+    <a href="/logout">Logout</a>
+  </nav>
+
+  <div class="container">
+    <h1>Member Entry Check-In</h1>
+
+    <div class="scanner-box">
+      <form id="scanForm">
+        <label for="barcodeInput">Scan or Type Barcode ID (e.g. BC-1001 or BC-1002):</label>
+        <input type="text" id="barcodeInput" placeholder="Scan barcode here..." autofocus required />
+        <button type="submit" style="margin-top: 10px;">Check Entry Access</button>
+      </form>
+    </div>
+
+    <div id="statusBadge"></div>
+  </div>
+
+  <script>
+    const form = document.getElementById('scanForm');
+    const input = document.getElementById('barcodeInput');
+    const badge = document.getElementById('statusBadge');
+
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const code = input.value.trim();
+
+      const res = await fetch('/api/scan-barcode', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ barcode: code })
+      });
+
+      const data = await res.json();
+      badge.style.display = 'block';
+
+      if (data.accessGranted) {
+        badge.className = 'granted';
+        badge.textContent = `🟢 ${data.message}`;
+      } else {
+        badge.className = 'denied';
+        badge.textContent = `🔴 ${data.message}`;
+      }
+
+      input.value = '';
+      input.focus();
+    });
+  </script>
+</body>
+</html>

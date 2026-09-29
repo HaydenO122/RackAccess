@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Rack Access - Member Roster</title>
+  <link rel="stylesheet" href="styles.css" />
+  <style>
+    .toolbar {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 20px;
+      gap: 15px;
+    }
+    .search-box {
+      flex: 1;
+      padding: 10px;
+      border-radius: 5px;
+      border: 1px solid #444;
+      background: #222;
+      color: #fff;
+      font-size: 1em;
+    }
+    .btn-add {
+      background-color: #ff9800;
+      color: white;
+      padding: 10px 18px;
+      text-decoration: none;
+      border-radius: 5px;
+      font-weight: bold;
+      white-space: nowrap;
+    }
+    .btn-action {
+      background: #2196F3;
+      color: white;
+      padding: 6px 12px;
+      text-decoration: none;
+      border-radius: 4px;
+      font-size: 0.85em;
+      margin-right: 5px;
+    }
+    .btn-delete {
+      background: #f44336;
+      color: white;
+      border: none;
+      padding: 6px 12px;
+      border-radius: 4px;
+      font-size: 0.85em;
+      cursor: pointer;
+    }
+  </style>
+</head>
+<body>
+  <nav>
+    <a href="/dashboard">Dashboard</a> |
+    <a href="/scan">Barcode Scanner</a> |
+    <a href="/members">Members</a> |
+    <a href="/signup">Sign Up Member</a> |
+    <a href="/logout">Logout</a>
+  </nav>
+
+  <div class="container" style="max-width: 950px;">
+    <h1>Active Member Roster</h1>
+
+    <div class="toolbar">
+      <input type="text" id="searchInput" class="search-box" placeholder="🔍 Search members by name, email, or barcode..." />
+      <a href="/signup" class="btn-add">+ Register New Member</a>
+    </div>
+
+    <table>
+      <thead>
+        <tr>
+          <th>Name</th>
+          <th>Email</th>
+          <th>Phone</th>
+          <th>Barcode ID</th>
+          <th>Status</th>
+          <th>Actions</th>
+        </tr>
+      </thead>
+      <tbody id="membersList">
+        <tr><td colspan="6" style="text-align: center;">Loading roster...</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <script>
+    let allMembers = [];
+
+    async function fetchMembers() {
+      try {
+        const response = await fetch('/api/members');
+        allMembers = await response.json();
+        renderTable(allMembers);
+      } catch (err) {
+        console.error('Error fetching members:', err);
+        document.getElementById('membersList').innerHTML = 
+          `<tr><td colspan="6" style="text-align: center; color: #f44336;">Error loading members roster.</td></tr>`;
+      }
+    }
+
+    function renderTable(membersList) {
+      const tbody = document.getElementById('membersList');
+      tbody.innerHTML = '';
+
+      if (membersList.length === 0) {
+        tbody.innerHTML = `<tr><td colspan="6" style="text-align: center; color: #aaa;">No members found.</td></tr>`;
+        return;
+      }
+
+      membersList.forEach(m => {
+        const tr = document.createElement('tr');
+        const isActive = m.status === 'active';
+        
+        tr.innerHTML = `
+          <td><strong>${m.fullName}</strong></td>
+          <td>${m.email}</td>
+          <td>${m.phone || '-'}</td>
+          <td><code>${m.barcode || 'N/A'}</code></td>
+          <td style="color: ${isActive ? '#4caf50' : '#f44336'}; font-weight: bold;">
+            ${m.status ? m.status.toUpperCase() : 'ACTIVE'}
+          </td>
+          <td>
+            <a href="/edit-member?barcode=${encodeURIComponent(m.barcode)}" class="btn-action">Edit / View</a>
+            <button onclick="deleteMember('${m.barcode}', '${m.fullName}')" class="btn-delete">Delete</button>
+          </td>
+        `;
+        tbody.appendChild(tr);
+      });
+    }
+
+    // Filter functionality
+    document.getElementById('searchInput').addEventListener('input', (e) => {
+      const query = e.target.value.toLowerCase();
+      const filtered = allMembers.filter(m => 
+        m.fullName.toLowerCase().includes(query) ||
+        m.email.toLowerCase().includes(query) ||
+        (m.barcode && m.barcode.toLowerCase().includes(query))
+      );
+      renderTable(filtered);
+    });
+
+    // Delete Member Function
+    async function deleteMember(barcode, name) {
+      if (!confirm(`Are you sure you want to delete member: ${name}?`)) return;
+
+      try {
+        const res = await fetch(`/api/member/${barcode}`, { method: 'DELETE' });
+        const data = await res.json();
+        if (data.success) {
+          fetchMembers(); // Reload table
+        } else {
+          alert(data.error || 'Failed to delete member.');
+        }
+      } catch (e) {
+        alert('An error occurred while deleting member.');
+      }
+    }
+
+    fetchMembers();
+  </script>
+</body>
+</html>

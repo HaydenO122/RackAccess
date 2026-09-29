@@ -1,0 +1,436 @@
+require('dotenv').config();
+
+const express = require('express');
+const session = require('express-session');
+const pgSession = require('connect-pg-simple')(session);
+const { Pool, types } = require('pg');
+const bcrypt = require('bcryptjs');
+const Stripe = require('stripe');
+const path = require('path');
+
+// Return NUMERIC columns as JS numbers (pg returns strings by default)
+types.setTypeParser(1700, (v) => parseFloat(v));
+
+const app = express();
+const PORT = process.env.PORT || 3000;
+const isProd = process.env.NODE_ENV === 'production';
+
+// Stripe (secret key from env)
+const stripe = Stripe(process.env.STRIPE_SECRET_KEY);
+
+// Neon Postgres connection
+const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+
+// Wrap async routes so errors don't crash the server
+const wrap = (fn) => (req, res, next) =>
+  fn(req, res, next).catch((err) => {
+    console.error(err);
+    res.status(500).json({ error: 'Server error' });
+  });
+
+// -----------------------------------------------------------------------------
+// DATABASE SETUP (tables are created automatically on startup)
+// -----------------------------------------------------------------------------
+
+async function initDb() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS admins (
+      id SERIAL PRIMARY KEY,
+      username TEXT UNIQUE NOT NULL,
+      "passwordHash" TEXT NOT NULL,
+      "gymId" TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS plans (
+      id TEXT PRIMARY KEY,
+      "gymId" TEXT NOT NULL,
+      "planName" TEXT NOT NULL,
+      "monthlyPrice" NUMERIC(10,2) NOT NULL,
+      "signupFee" NUMERIC(10,2) NOT NULL DEFAULT 0,
+      "yearlyFee" NUMERIC(10,2) NOT NULL DEFAULT 0,
+      "stripePriceId" TEXT,
+      "stripeSignupPriceId" TEXT,
+      "stripeYearlyPriceId" TEXT,
+      "createdAt" TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+
+    CREATE TABLE IF NOT EXISTS members (
+      id SERIAL PRIMARY KEY,
+      "fullName" TEXT NOT NULL,
+      email TEXT,
+      phone TEXT NOT NULL DEFAULT '',
+      barcode TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'active',
+      "planId" TEXT,
+      "stripeCustomerId" TEXT,
+      "gymId" TEXT NOT NULL,
+      UNIQUE ("gymId", barcode)
+    );
+  `);
+
+  // First-time admin account: set ADMIN_USERNAME and ADMIN_PASSWORD in env
+  const { rows } = await pool.query('SELECT COUNT(*)::int AS n FROM admins');
+  if (rows[0].n === 0) {
+    if (process.env.ADMIN_USERNAME && process.env.ADMIN_PASSWORD) {
+      const hash = await bcrypt.hash(process.env.ADMIN_PASSWORD, 10);
+      await pool.query(
+        'INSERT INTO admins (username, "passwordHash", "gymId") VALUES ($1, $2, $3)',
+        [process.env.ADMIN_USERNAME, hash, 'gym_001']
+      );
+      console.log(`Created first admin "${process.env.ADMIN_USERNAME}"`);
+    } else {
+      console.warn('No admins exist. Set ADMIN_USERNAME and ADMIN_PASSWORD env vars, or run migrate.js.');
+    }
+  }
+}
+
+// -----------------------------------------------------------------------------
+// MIDDLEWARE
+// -----------------------------------------------------------------------------
+
+app.set('trust proxy', 1); // needed behind Render's proxy for secure cookies
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+app.use(express.static('public'));
+
+if (!process.env.SESSION_SECRET) {
+  console.warn('SESSION_SECRET is not set. Set it in your env before going live.');
+}
+
+app.use(
+  session({
+    store: new pgSession({ pool, createTableIfMissing: true }), // sessions survive restarts
+    secret: process.env.SESSION_SECRET || 'dev-only-secret-change-me',
+    resave: false,
+    saveUninitialized: false,
+    cookie: {
+      maxAge: 24 * 60 * 60 * 1000, // 24 hours
+      httpOnly: true,
+      sameSite: 'lax',
+      secure: isProd,
+    },
+  })
+);
+
+function requireLogin(req, res, next) {
+  if (req.session && req.session.admin) return next();
+  res.redirect('/index.html');
+}
+
+// -----------------------------------------------------------------------------
+// PAGE NAVIGATION ROUTES
+// -----------------------------------------------------------------------------
+
+app.get('/health', (req, res) => res.send('ok')); // for UptimeRobot
+
+app.get('/', (req, res) => {
+  if (req.session.admin) return res.redirect('/dashboard');
+  res.sendFile(path.join(__dirname, 'public', 'index.html'));
+});
+
+const pages = ['dashboard', 'scan', 'signup', 'members', 'edit-member', 'plans'];
+pages.forEach((page) => {
+  app.get(`/${page}`, requireLogin, (req, res) => {
+    res.sendFile(path.join(__dirname, 'public', `${page}.html`));
+  });
+});
+
+// -----------------------------------------------------------------------------
+// API & ACTION ENDPOINTS
+// -----------------------------------------------------------------------------
+
+// Admin login
+app.post(
+  '/login',
+  wrap(async (req, res) => {
+    const { username, password } = req.body;
+    const { rows } = await pool.query('SELECT * FROM admins WHERE username = $1', [username]);
+    const admin = rows[0];
+
+    if (admin && (await bcrypt.compare(password || '', admin.passwordHash))) {
+      req.session.admin = { username: admin.username, gymId: admin.gymId };
+      return res.redirect('/dashboard');
+    }
+    res.send('<h3>Invalid Username or Password. <a href="/">Try Again</a></h3>');
+  })
+);
+
+app.get('/logout', (req, res) => {
+  req.session.destroy(() => res.redirect('/'));
+});
+
+// Add new admin account
+app.post(
+  '/add-admin',
+  requireLogin,
+  wrap(async (req, res) => {
+    const { newUsername, newPassword } = req.body;
+    const currentGymId = req.session.admin.gymId;
+
+    const existing = await pool.query('SELECT 1 FROM admins WHERE username = $1', [newUsername]);
+    if (existing.rowCount > 0) {
+      return res.send('<h3>Username already exists! <a href="/dashboard">Back to Dashboard</a></h3>');
+    }
+
+    const hash = await bcrypt.hash(newPassword, 10);
+    await pool.query(
+      'INSERT INTO admins (username, "passwordHash", "gymId") VALUES ($1, $2, $3)',
+      [newUsername, hash, currentGymId]
+    );
+    res.send('<h3>Admin Created Successfully! <a href="/dashboard">Back to Dashboard</a></h3>');
+  })
+);
+
+// Publishable Stripe key
+app.get('/stripe-key', (req, res) => {
+  res.json({ publicKey: process.env.stripe_public_key });
+});
+
+// -----------------------------------------------------------------------------
+// PLAN MANAGEMENT ENDPOINTS
+// -----------------------------------------------------------------------------
+
+app.get(
+  '/api/plans',
+  requireLogin,
+  wrap(async (req, res) => {
+    const { rows } = await pool.query(
+      'SELECT * FROM plans WHERE "gymId" = $1 ORDER BY "createdAt"',
+      [req.session.admin.gymId]
+    );
+    res.json(rows);
+  })
+);
+
+app.post('/api/plans', requireLogin, async (req, res) => {
+  const gymId = req.session.admin.gymId;
+  const { planName, monthlyPrice, signupFee, yearlyFee } = req.body;
+
+  if (!planName || !monthlyPrice) {
+    return res.status(400).json({ error: 'Plan name and monthly price are required.' });
+  }
+
+  try {
+    // 1. Recurring monthly price in Stripe
+    const stripePrice = await stripe.prices.create({
+      unit_amount: Math.round(parseFloat(monthlyPrice) * 100),
+      currency: 'usd',
+      recurring: { interval: 'month' },
+      product_data: { name: `${planName} (Monthly)` },
+    });
+
+    // 2. Optional one-time sign up fee
+    let signupFeePriceId = null;
+    if (signupFee && parseFloat(signupFee) > 0) {
+      const p = await stripe.prices.create({
+        unit_amount: Math.round(parseFloat(signupFee) * 100),
+        currency: 'usd',
+        product_data: { name: `${planName} - Sign Up Fee` },
+      });
+      signupFeePriceId = p.id;
+    }
+
+    // 3. Optional annual fee
+    let yearlyFeePriceId = null;
+    if (yearlyFee && parseFloat(yearlyFee) > 0) {
+      const p = await stripe.prices.create({
+        unit_amount: Math.round(parseFloat(yearlyFee) * 100),
+        currency: 'usd',
+        recurring: { interval: 'year' },
+        product_data: { name: `${planName} - Annual Maintenance Fee` },
+      });
+      yearlyFeePriceId = p.id;
+    }
+
+    const { rows } = await pool.query(
+      `INSERT INTO plans
+        (id, "gymId", "planName", "monthlyPrice", "signupFee", "yearlyFee",
+         "stripePriceId", "stripeSignupPriceId", "stripeYearlyPriceId")
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+       RETURNING *`,
+      [
+        `plan_${Date.now()}`,
+        gymId,
+        planName,
+        parseFloat(monthlyPrice),
+        signupFee ? parseFloat(signupFee) : 0,
+        yearlyFee ? parseFloat(yearlyFee) : 0,
+        stripePrice.id,
+        signupFeePriceId,
+        yearlyFeePriceId,
+      ]
+    );
+
+    res.json({ success: true, plan: rows[0] });
+  } catch (err) {
+    console.error('Error creating plan:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// -----------------------------------------------------------------------------
+// MEMBER ENROLLMENT & MANAGEMENT ENDPOINTS
+// -----------------------------------------------------------------------------
+
+// Register new member
+app.post('/create-subscription', requireLogin, async (req, res) => {
+  const { paymentMethodId, email, fullName, phone, barcode, planId } = req.body;
+  const gymId = req.session.admin.gymId;
+
+  try {
+    // Pick the barcode first so we never create a Stripe customer for a duplicate
+    let assignedBarcode = barcode;
+    if (assignedBarcode) {
+      const dup = await pool.query('SELECT 1 FROM members WHERE "gymId" = $1 AND barcode = $2', [
+        gymId,
+        assignedBarcode,
+      ]);
+      if (dup.rowCount > 0) {
+        return res.status(400).json({ error: 'That barcode is already assigned to another member.' });
+      }
+    } else {
+      for (let i = 0; i < 10; i++) {
+        const candidate = `BC-${Math.floor(1000 + Math.random() * 9000)}`;
+        const dup = await pool.query('SELECT 1 FROM members WHERE "gymId" = $1 AND barcode = $2', [
+          gymId,
+          candidate,
+        ]);
+        if (dup.rowCount === 0) {
+          assignedBarcode = candidate;
+          break;
+        }
+      }
+      if (!assignedBarcode) {
+        return res.status(500).json({ error: 'Could not generate a unique barcode. Try again.' });
+      }
+    }
+
+    const customer = await stripe.customers.create({
+      payment_method: paymentMethodId,
+      email,
+      name: fullName,
+      invoice_settings: { default_payment_method: paymentMethodId },
+    });
+
+    await pool.query(
+      `INSERT INTO members
+        ("fullName", email, phone, barcode, status, "planId", "stripeCustomerId", "gymId")
+       VALUES ($1, $2, $3, $4, 'active', $5, $6, $7)`,
+      [fullName, email, phone || '', assignedBarcode, planId || null, customer.id, gymId]
+    );
+
+    res.json({ success: true, barcode: assignedBarcode });
+  } catch (error) {
+    console.error('Stripe registration error:', error);
+    res.status(400).json({ error: error.message });
+  }
+});
+
+// All members for current gym
+app.get(
+  '/api/members',
+  requireLogin,
+  wrap(async (req, res) => {
+    const { rows } = await pool.query('SELECT * FROM members WHERE "gymId" = $1 ORDER BY id', [
+      req.session.admin.gymId,
+    ]);
+    res.json(rows);
+  })
+);
+
+// Single member by barcode
+app.get(
+  '/api/member/:barcode',
+  requireLogin,
+  wrap(async (req, res) => {
+    const { rows } = await pool.query('SELECT * FROM members WHERE "gymId" = $1 AND barcode = $2', [
+      req.session.admin.gymId,
+      req.params.barcode,
+    ]);
+    if (rows.length === 0) return res.status(404).json({ error: 'Member not found.' });
+    res.json(rows[0]);
+  })
+);
+
+// Update member profile & status
+app.post(
+  '/api/update-member',
+  requireLogin,
+  wrap(async (req, res) => {
+    const gymId = req.session.admin.gymId;
+    const { originalBarcode, fullName, email, phone, barcode, status } = req.body;
+
+    try {
+      const result = await pool.query(
+        `UPDATE members
+         SET "fullName" = $1, email = $2, phone = $3, barcode = $4, status = $5
+         WHERE "gymId" = $6 AND barcode = $7`,
+        [fullName, email, phone || '', barcode, status, gymId, originalBarcode]
+      );
+      if (result.rowCount === 0) {
+        return res.status(404).json({ error: 'Member record not found.' });
+      }
+      res.json({ success: true });
+    } catch (err) {
+      if (err.code === '23505') {
+        return res.status(400).json({ error: 'That barcode is already assigned to another member.' });
+      }
+      throw err;
+    }
+  })
+);
+
+// Barcode scan (check-in verification)
+app.post(
+  '/api/verify-scan',
+  requireLogin,
+  wrap(async (req, res) => {
+    const { barcode } = req.body;
+    const { rows } = await pool.query('SELECT * FROM members WHERE "gymId" = $1 AND barcode = $2', [
+      req.session.admin.gymId,
+      barcode,
+    ]);
+    const member = rows[0];
+
+    if (!member) {
+      return res.json({ access: false, message: 'Card / Barcode Not Recognized' });
+    }
+    if (member.status === 'active') {
+      return res.json({ access: true, memberName: member.fullName, message: 'Access Granted' });
+    }
+    return res.json({
+      access: false,
+      memberName: member.fullName,
+      message: 'Access Denied: Unpaid or Inactive Account',
+    });
+  })
+);
+
+// Delete member
+app.delete(
+  '/api/member/:barcode',
+  requireLogin,
+  wrap(async (req, res) => {
+    const result = await pool.query('DELETE FROM members WHERE "gymId" = $1 AND barcode = $2', [
+      req.session.admin.gymId,
+      req.params.barcode,
+    ]);
+    if (result.rowCount === 0) return res.status(404).json({ error: 'Member not found.' });
+    res.json({ success: true });
+  })
+);
+
+// -----------------------------------------------------------------------------
+// START
+// -----------------------------------------------------------------------------
+
+initDb()
+  .then(() => {
+    app.listen(PORT, () => {
+      console.log(`Rack Access Server running on port ${PORT}`);
+    });
+  })
+  .catch((err) => {
+    console.error('Failed to initialize database:', err);
+    process.exit(1);
+  });

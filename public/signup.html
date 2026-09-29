@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Rack Access - New Member Sign-Up</title>
+  <link rel="stylesheet" href="styles.css" />
+  <script src="https://js.stripe.com/v3/"></script>
+</head>
+<body>
+  <nav>
+    <a href="/dashboard">Dashboard</a> |
+    <a href="/scan">Barcode Scanner</a> |
+    <a href="/members">Members</a> |
+    <a href="/plans">Plans</a> |
+    <a href="/logout">Logout</a>
+  </nav>
+
+  <div class="container" style="max-width: 600px;">
+    <h1>Member Registration & Payment</h1>
+    <form id="signup-form">
+      <label for="fullName">Full Name</label>
+      <input type="text" id="fullName" required placeholder="John Doe" />
+
+      <label for="email">Email</label>
+      <input type="email" id="email" required placeholder="john@example.com" />
+
+      <label for="phone">Phone</label>
+      <input type="tel" id="phone" placeholder="803-555-0199" />
+
+      <label for="planId">Select Membership Plan</label>
+      <select id="planId" required style="width: 100%; padding: 12px; background: #333; color: white; border: 1px solid #555; border-radius: 5px; margin-bottom: 15px;">
+        <option value="">Loading plans...</option>
+      </select>
+
+      <label for="barcode">Assign Barcode / Key Tag ID</label>
+      <div style="display: flex; gap: 8px;">
+        <input type="text" id="barcode" placeholder="Scan USB tag or type barcode ID..." style="flex: 1;" />
+        <button type="button" id="autoGenBtn" style="background-color: #555; white-space: nowrap;">Auto-Generate</button>
+      </div>
+      <small style="color: #888; display: block; margin-top: 4px; margin-bottom: 15px;">
+        Plug in your USB scanner, click into this box, and scan the key fob or barcode sticker.
+      </small>
+
+      <label>Credit / Debit Card</label>
+      <div id="card-element" style="background: #333; padding: 12px; border-radius: 5px; margin-bottom: 15px;"></div>
+
+      <button type="submit" id="submitBtn">Register & Charge Membership</button>
+      <p id="msg" style="margin-top: 15px; font-weight: bold;"></p>
+    </form>
+  </div>
+
+  <script>
+    const barcodeInput = document.getElementById('barcode');
+    const autoGenBtn = document.getElementById('autoGenBtn');
+
+    // Auto-generate barcode tag
+    autoGenBtn.addEventListener('click', () => {
+      barcodeInput.value = `BC-${Math.floor(1000 + Math.random() * 9000)}`;
+    });
+
+    // Prevent scanner Enter key from prematurely submitting the form
+    barcodeInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        e.preventDefault(); 
+        barcodeInput.blur();
+      }
+    });
+
+    // Load custom plans into the dropdown
+    async function loadPlans() {
+      const planSelect = document.getElementById('planId');
+      try {
+        const res = await fetch('/api/plans');
+        const plans = await res.json();
+
+        if (plans.length === 0) {
+          planSelect.innerHTML = '<option value="">No active plans. Create one on the Plans page first!</option>';
+          return;
+        }
+
+        planSelect.innerHTML = '<option value="">-- Select a Membership Plan --</option>';
+        plans.forEach(p => {
+          const opt = document.createElement('option');
+          opt.value = p.id;
+          opt.textContent = `${p.planName} - $${p.monthlyPrice.toFixed(2)}/mo ($${p.signupFee.toFixed(2)} start / $${p.yearlyFee.toFixed(2)} annual)`;
+          planSelect.appendChild(opt);
+        });
+      } catch (err) {
+        planSelect.innerHTML = '<option value="">Error loading plans</option>';
+      }
+    }
+
+    async function init() {
+      await loadPlans();
+
+      const keyRes = await fetch('/stripe-key');
+      const { publicKey } = await keyRes.json();
+      const stripe = Stripe(publicKey);
+      const elements = stripe.elements();
+      const card = elements.create('card');
+      card.mount('#card-element');
+
+      const form = document.getElementById('signup-form');
+      const msg = document.getElementById('msg');
+
+      form.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        msg.style.color = '#fff';
+        msg.textContent = 'Processing payment...';
+
+        const { paymentMethod, error } = await stripe.createPaymentMethod({
+          type: 'card',
+          card: card,
+          billing_details: {
+            name: document.getElementById('fullName').value,
+            email: document.getElementById('email').value,
+          }
+        });
+
+        if (error) {
+          msg.style.color = '#f44336';
+          msg.textContent = error.message;
+          return;
+        }
+
+        const res = await fetch('/create-subscription', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            paymentMethodId: paymentMethod.id,
+            fullName: document.getElementById('fullName').value,
+            email: document.getElementById('email').value,
+            phone: document.getElementById('phone').value,
+            planId: document.getElementById('planId').value,
+            barcode: barcodeInput.value.trim()
+          })
+        });
+
+        const data = await res.json();
+        if (data.success) {
+          msg.style.color = '#4caf50';
+          msg.textContent = `Success! Member enrolled with Barcode: ${data.barcode}`;
+          form.reset();
+          card.clear();
+        } else {
+          msg.style.color = '#f44336';
+          msg.textContent = data.error || 'Registration failed.';
+        }
+      });
+    }
+
+    init();
+  </script>
+</body>
+</html>

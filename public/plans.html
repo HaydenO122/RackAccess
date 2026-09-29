@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Rack Access - Manage Membership Plans</title>
+  <link rel="stylesheet" href="styles.css" />
+  <style>
+    .plan-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+      gap: 15px;
+      margin-top: 20px;
+    }
+    .plan-card {
+      background: #222;
+      border: 1px solid #333;
+      padding: 15px;
+      border-radius: 8px;
+    }
+    .plan-card h3 { margin-top: 0; color: #4caf50; }
+    .price-tag { font-size: 1.5em; font-weight: bold; margin: 10px 0; }
+    .fee-info { font-size: 0.9em; color: #aaa; }
+  </style>
+</head>
+<body>
+  <nav>
+    <a href="/dashboard">Dashboard</a> |
+    <a href="/scan">Barcode Scanner</a> |
+    <a href="/members">Members</a> |
+    <a href="/plans">Plans</a> |
+    <a href="/signup">Sign Up Member</a> |
+    <a href="/logout">Logout</a>
+  </nav>
+
+  <div class="container" style="max-width: 800px;">
+    <h1>Membership Plans Manager</h1>
+
+    <!-- Create Plan Form -->
+    <div style="background: #1a1a1a; padding: 20px; border-radius: 8px; margin-bottom: 30px;">
+      <h2>Create New Plan</h2>
+      <form id="createPlanForm">
+        <label for="planName">Plan Name</label>
+        <input type="text" id="planName" required placeholder="e.g., Gold VIP Access" />
+
+        <div style="display: flex; gap: 10px;">
+          <div style="flex: 1;">
+            <label for="monthlyPrice">Monthly Fee ($)</label>
+            <input type="number" id="monthlyPrice" step="0.01" required placeholder="29.99" />
+          </div>
+          <div style="flex: 1;">
+            <label for="signupFee">Sign Up Fee ($ - Optional)</label>
+            <input type="number" id="signupFee" step="0.01" placeholder="49.00" />
+          </div>
+          <div style="flex: 1;">
+            <label for="yearlyFee">Annual Fee ($ - Optional)</label>
+            <input type="number" id="yearlyFee" step="0.01" placeholder="39.99" />
+          </div>
+        </div>
+
+        <button type="submit" style="margin-top: 15px;">Save & Publish Plan</button>
+        <p id="planMsg" style="margin-top: 10px;"></p>
+      </form>
+    </div>
+
+    <h2>Active Gym Plans</h2>
+    <div id="plansList" class="plan-grid">Loading plans...</div>
+  </div>
+
+  <script>
+    async function loadPlans() {
+      const res = await fetch('/api/plans');
+      const plans = await res.json();
+      const listContainer = document.getElementById('plansList');
+
+      if (plans.length === 0) {
+        listContainer.innerHTML = '<p style="color: #888;">No active plans found. Create one above!</p>';
+        return;
+      }
+
+      listContainer.innerHTML = '';
+      plans.forEach(p => {
+        const div = document.createElement('div');
+        div.className = 'plan-card';
+        div.innerHTML = `
+          <h3>${p.planName}</h3>
+          <div class="price-tag">$${p.monthlyPrice.toFixed(2)} <span style="font-size: 0.5em; color:#aaa;">/mo</span></div>
+          <div class="fee-info">
+            <p>Initiation Fee: <strong>$${p.signupFee ? p.signupFee.toFixed(2) : '0.00'}</strong></p>
+            <p>Annual Maintenance: <strong>$${p.yearlyFee ? p.yearlyFee.toFixed(2) : '0.00'}</strong></p>
+          </div>
+        `;
+        listContainer.appendChild(div);
+      });
+    }
+
+    document.getElementById('createPlanForm').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const planMsg = document.getElementById('planMsg');
+      planMsg.textContent = 'Creating plan in Stripe...';
+
+      const payload = {
+        planName: document.getElementById('planName').value,
+        monthlyPrice: document.getElementById('monthlyPrice').value,
+        signupFee: document.getElementById('signupFee').value,
+        yearlyFee: document.getElementById('yearlyFee').value
+      };
+
+      const res = await fetch('/api/plans', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+
+      const data = await res.json();
+      if (data.success) {
+        planMsg.style.color = '#4caf50';
+        planMsg.textContent = 'Plan created successfully!';
+        document.getElementById('createPlanForm').reset();
+        loadPlans();
+      } else {
+        planMsg.style.color = '#f44336';
+        planMsg.textContent = data.error || 'Failed to create plan.';
+      }
+    });
+
+    loadPlans();
+  </script>
+</body>
+</html>

@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Rack Access - Edit Member</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <nav>
+    <a href="/dashboard">Dashboard</a> |
+    <a href="/scan">Barcode Scanner</a> |
+    <a href="/members">Members</a> |
+    <a href="/signup">Sign Up Member</a> |
+    <a href="/logout">Logout</a>
+  </nav>
+
+  <div class="container" style="max-width: 600px;">
+    <h1>Member Details & Edit</h1>
+    <p id="loadingMsg">Loading member data...</p>
+
+    <form id="editForm" style="display: none;">
+      <input type="hidden" id="originalBarcode" />
+
+      <label for="fullName">Full Name</label>
+      <input type="text" id="fullName" required />
+
+      <label for="email">Email</label>
+      <input type="email" id="email" required />
+
+      <label for="phone">Phone Number</label>
+      <input type="tel" id="phone" />
+
+      <label for="barcode">Barcode / Key Tag ID</label>
+      <input type="text" id="barcode" required />
+
+      <label for="status">Membership / Payment Status</label>
+      <select id="status" style="width: 100%; padding: 12px; background: #333; color: white; border: 1px solid #555; border-radius: 5px; margin-bottom: 15px;">
+        <option value="active">Active (Access Granted)</option>
+        <option value="unpaid">Unpaid / Past Due (Access Denied)</option>
+      </select>
+
+      <button type="submit">Save Changes</button>
+      <a href="/members" style="display: block; text-align: center; margin-top: 15px; color: #aaa; text-decoration: none;">Cancel</a>
+      <p id="statusMsg" style="margin-top: 15px; font-weight: bold;"></p>
+    </form>
+  </div>
+
+  <script>
+    const urlParams = new URLSearchParams(window.location.search);
+    const targetBarcode = urlParams.get('barcode');
+
+    async function loadMemberData() {
+      if (!targetBarcode) {
+        document.getElementById('loadingMsg').textContent = 'No barcode provided in URL.';
+        return;
+      }
+
+      try {
+        const res = await fetch(`/api/member/${targetBarcode}`);
+        if (!res.ok) throw new Error('Member not found');
+        const data = await res.json();
+
+        document.getElementById('originalBarcode').value = data.barcode;
+        document.getElementById('fullName').value = data.fullName;
+        document.getElementById('email').value = data.email;
+        document.getElementById('phone').value = data.phone || '';
+        document.getElementById('barcode').value = data.barcode;
+        document.getElementById('status').value = data.status || 'active';
+
+        document.getElementById('loadingMsg').style.display = 'none';
+        document.getElementById('editForm').style.display = 'block';
+      } catch (err) {
+        document.getElementById('loadingMsg').textContent = 'Error: Unable to locate member account.';
+      }
+    }
+
+    document.getElementById('editForm').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const statusMsg = document.getElementById('statusMsg');
+      statusMsg.textContent = 'Saving updates...';
+
+      const updatedPayload = {
+        originalBarcode: document.getElementById('originalBarcode').value,
+        fullName: document.getElementById('fullName').value,
+        email: document.getElementById('email').value,
+        phone: document.getElementById('phone').value,
+        barcode: document.getElementById('barcode').value.trim(),
+        status: document.getElementById('status').value
+      };
+
+      const res = await fetch('/api/update-member', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(updatedPayload)
+      });
+
+      const result = await res.json();
+      if (result.success) {
+        statusMsg.style.color = '#4caf50';
+        statusMsg.textContent = 'Member updated successfully! Redirecting...';
+        setTimeout(() => { window.location.href = '/members'; }, 1200);
+      } else {
+        statusMsg.style.color = '#f44336';
+        statusMsg.textContent = result.error || 'Failed to update member.';
+      }
+    });
+
+    loadMemberData();
+  </script>
+</body>
+</html>

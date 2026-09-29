@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Rack Access - Payments</title>
+  <link rel="stylesheet" href="styles.css" />
+  <script src="https://js.stripe.com/v3/"></script>
+  <style>
+    #card-element {
+      background-color: #333;
+      padding: 12px;
+      border-radius: 6px;
+      color: white;
+      margin-bottom: 15px;
+    }
+    #submit {
+      background-color: #4caf50;
+      color: white;
+      border: none;
+      padding: 12px 24px;
+      border-radius: 6px;
+      font-size: 1em;
+      cursor: pointer;
+      width: 100%;
+    }
+    #submit:disabled {
+      background-color: #888;
+      cursor: not-allowed;
+    }
+    #error-message {
+      color: #f44336;
+      margin-top: 10px;
+      min-height: 20px;
+    }
+  </style>
+</head>
+<body>
+  <nav>
+    <a href="/dashboard">Dashboard</a> |
+    <a href="/members">Members</a> |
+    <a href="/payments">Payments</a> |
+    <a href="/logout">Logout</a>
+  </nav>
+
+  <div class="container">
+    <h1>Subscribe to Membership</h1>
+    <form id="payment-form">
+      <label for="email">Email</label>
+      <input id="email" name="email" type="email" required placeholder="you@example.com" autocomplete="email" />
+
+      <label for="card-element">Credit or Debit Card</label>
+      <div id="card-element"></div>
+
+      <button type="submit" id="submit" disabled>Subscribe</button>
+
+      <div id="error-message" role="alert"></div>
+    </form>
+  </div>
+
+  <script>
+    async function loadStripeKey() {
+      const response = await fetch('/stripe-key');
+      const data = await response.json();
+      return data.publicKey;
+    }
+
+    async function initializeStripeForm() {
+      const publicKey = await loadStripeKey();
+      if (!publicKey) {
+        document.getElementById('error-message').textContent = 'Unable to load payment system. Please try again later.';
+        return;
+      }
+
+      const stripe = Stripe(publicKey);
+      const elements = stripe.elements();
+      const card = elements.create('card');
+      card.mount('#card-element');
+
+      const form = document.getElementById('payment-form');
+      const submitButton = document.getElementById('submit');
+      const errorMessage = document.getElementById('error-message');
+
+      card.on('ready', () => {
+        submitButton.disabled = false;
+      });
+
+      card.on('change', (event) => {
+        if (event.error) {
+          errorMessage.textContent = event.error.message;
+        } else {
+          errorMessage.textContent = '';
+        }
+      });
+
+      form.addEventListener('submit', async (event) => {
+        event.preventDefault();
+        submitButton.disabled = true;
+        errorMessage.textContent = '';
+
+        const emailValue = form.email.value;
+        if (!emailValue) {
+          errorMessage.textContent = 'Please enter an email.';
+          submitButton.disabled = false;
+          return;
+        }
+
+        const { paymentMethod, error } = await stripe.createPaymentMethod({
+          type: 'card',
+          card: card,
+          billing_details: {
+            email: emailValue,
+          },
+        });
+
+        if (error) {
+          errorMessage.textContent = error.message;
+          submitButton.disabled = false;
+          return;
+        }
+
+        try {
+          const response = await fetch('/create-subscription', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              paymentMethodId: paymentMethod.id,
+              email: emailValue,
+              planId: 'your_stripe_plan_id_here' // Replace with your actual Stripe price/plan ID
+            }),
+          });
+
+          const result = await response.json();
+
+          if (result.error) {
+            errorMessage.textContent = result.error;
+          } else {
+            alert('Subscription successful!');
+            form.reset();
+            card.clear();
+          }
+        } catch (e) {
+          errorMessage.textContent = 'Network error, please try again.';
+        }
+        submitButton.disabled = false;
+      });
+    }
+
+    initializeStripeForm();
+  </script>
+</body>
+</html>
