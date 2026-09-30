@@ -8,14 +8,16 @@
   <script src="https://js.stripe.com/v3/"></script>
 </head>
 <body>
+  <a href="/dashboard.html" class="brand-header">RackAccess</a>
+
   <nav>
-  <a href="/dashboard.html">Dashboard</a>
-  <a href="/scan.html">Barcode Scanner</a>
-  <a href="/members.html">Members</a>
-  <a href="/signup.html">Sign Up Member</a>
-  <a href="/plans.html">Plans</a>
-  <a href="/logout">Logout</a>
-</nav>
+    <a href="/dashboard.html">Dashboard</a>
+    <a href="/scan.html">Barcode Scanner</a>
+    <a href="/members.html">Members</a>
+    <a href="/signup.html" class="active">Sign Up Member</a>
+    <a href="/plans.html">Plans</a>
+    <a href="/logout">Logout</a>
+  </nav>
 
   <div class="container" style="max-width: 600px;">
     <h1>Member Registration & Payment</h1>
@@ -153,5 +155,6 @@
 
     init();
   </script>
+  <script src="/app.js"></script>
 </body>
 </html>
