@@ -34,11 +34,18 @@ const wrap = (fn) => (req, res, next) =>
 
 async function initDb() {
   await pool.query(`
+    CREATE TABLE IF NOT EXISTS gyms (
+      id VARCHAR(255) PRIMARY KEY,
+      name VARCHAR(255) NOT NULL,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+
     CREATE TABLE IF NOT EXISTS admins (
       id SERIAL PRIMARY KEY,
       username TEXT UNIQUE NOT NULL,
       "passwordHash" TEXT NOT NULL,
-      "gymId" TEXT NOT NULL
+      "gymId" TEXT NOT NULL,
+      "requiresPasswordChange" BOOLEAN DEFAULT false
     );
 
     CREATE TABLE IF NOT EXISTS plans (
@@ -74,7 +81,11 @@ async function initDb() {
     if (process.env.ADMIN_USERNAME && process.env.ADMIN_PASSWORD) {
       const hash = await bcrypt.hash(process.env.ADMIN_PASSWORD, 10);
       await pool.query(
-        'INSERT INTO admins (username, "passwordHash", "gymId") VALUES ($1, $2, $3)',
+        'INSERT INTO gyms (id, name) VALUES ($1, $2) ON CONFLICT (id) DO NOTHING',
+        ['gym_001', 'Default Gym']
+      );
+      await pool.query(
+        'INSERT INTO admins (username, "passwordHash", "gymId", "requiresPasswordChange") VALUES ($1, $2, $3, false)',
         [process.env.ADMIN_USERNAME, hash, 'gym_001']
       );
       console.log(`Created first admin "${process.env.ADMIN_USERNAME}"`);
@@ -139,6 +150,34 @@ pages.forEach((page) => {
 // API & ACTION ENDPOINTS
 // -----------------------------------------------------------------------------
 
+// SECRET ROUTE: For Hayden to create new gyms (e.g., /provision-gym?gymId=gym_002&gymName=Iron+House&username=admin_ironhouse)
+app.get(
+  '/provision-gym',
+  wrap(async (req, res) => {
+    const { gymId, gymName, username } = req.query;
+
+    if (!gymId || !gymName || !username) {
+      return res.send('Missing parameters. Format: ?gymId=...&gymName=...&username=...');
+    }
+
+    // 1. Create the blank gym
+    await pool.query(
+      'INSERT INTO gyms (id, name) VALUES ($1, $2) ON CONFLICT (id) DO NOTHING',
+      [gymId, gymName]
+    );
+
+    // 2. Create the admin with password '1234' and flag them for a reset
+    const hash = await bcrypt.hash('1234', 10);
+    await pool.query(
+      `INSERT INTO admins (username, "passwordHash", "gymId", "requiresPasswordChange") 
+       VALUES ($1, $2, $3, true)`,
+      [username, hash, gymId]
+    );
+
+    res.send(`Successfully provisioned ${gymName}! Tell them to log in with username: ${username} and password: 1234`);
+  })
+);
+
 // Admin login
 app.post(
   '/login',
@@ -148,10 +187,58 @@ app.post(
     const admin = rows[0];
 
     if (admin && (await bcrypt.compare(password || '', admin.passwordHash))) {
+      
+      // Check if they are a new gym needing a password reset
+      if (admin.requiresPasswordChange) {
+        // Log them in temporarily but flag the session
+        req.session.pendingAdmin = { id: admin.id, username: admin.username, gymId: admin.gymId };
+        return res.send(`
+          <div style="font-family: sans-serif; max-width: 400px; margin: 50px auto; text-align: center;">
+            <h3>Welcome! Please set your permanent secure password.</h3>
+            <form action="/api/setup-password" method="POST" style="display: flex; flex-direction: column; gap: 10px;">
+              <input type="password" name="newPassword" placeholder="New Password" required style="padding: 10px; font-size: 16px;">
+              <button type="submit" style="padding: 10px; font-size: 16px; background-color: #007bff; color: white; border: none; cursor: pointer;">Save & Login</button>
+            </form>
+          </div>
+        `);
+      }
+
+      // Normal login for existing users
       req.session.admin = { username: admin.username, gymId: admin.gymId };
       return res.redirect('/dashboard');
     }
     res.send('<h3>Invalid Username or Password. <a href="/">Try Again</a></h3>');
+  })
+);
+
+// Setup new password on first login
+app.post(
+  '/api/setup-password',
+  wrap(async (req, res) => {
+    if (!req.session.pendingAdmin) {
+      return res.redirect('/');
+    }
+
+    const { newPassword } = req.body;
+    const admin = req.session.pendingAdmin;
+
+    // Hash the new secure password
+    const newHash = await bcrypt.hash(newPassword, 10);
+
+    // Update DB and remove the flag
+    await pool.query(
+      `UPDATE admins 
+       SET "passwordHash" = $1, "requiresPasswordChange" = false 
+       WHERE id = $2`,
+      [newHash, admin.id]
+    );
+
+    // Upgrade their pending session to a real session
+    req.session.admin = { username: admin.username, gymId: admin.gymId };
+    delete req.session.pendingAdmin;
+
+    // Send them to their brand new, isolated dashboard
+    res.redirect('/dashboard');
   })
 );
 
@@ -174,7 +261,7 @@ app.post(
 
     const hash = await bcrypt.hash(newPassword, 10);
     await pool.query(
-      'INSERT INTO admins (username, "passwordHash", "gymId") VALUES ($1, $2, $3)',
+      'INSERT INTO admins (username, "passwordHash", "gymId", "requiresPasswordChange") VALUES ($1, $2, $3, false)',
       [newUsername, hash, currentGymId]
     );
     res.send('<h3>Admin Created Successfully! <a href="/dashboard">Back to Dashboard</a></h3>');
