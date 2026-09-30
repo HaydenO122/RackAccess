@@ -15,6 +15,9 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 const isProd = process.env.NODE_ENV === 'production';
 
+// Platform fee percentage collected on transactions (Default: 5%)
+const PLATFORM_FEE_PERCENT = parseFloat(process.env.PLATFORM_FEE_PERCENT || 5);
+
 // Stripe (secret key from env)
 const stripe = Stripe(process.env.STRIPE_SECRET_KEY);
 
@@ -37,6 +40,7 @@ async function initDb() {
     CREATE TABLE IF NOT EXISTS gyms (
       id VARCHAR(255) PRIMARY KEY,
       name VARCHAR(255) NOT NULL,
+      "stripeAccountId" TEXT,
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
 
@@ -70,6 +74,7 @@ async function initDb() {
       status TEXT NOT NULL DEFAULT 'active',
       "planId" TEXT,
       "stripeCustomerId" TEXT,
+      "stripeSubscriptionId" TEXT,
       "gymId" TEXT NOT NULL,
       UNIQUE ("gymId", barcode)
     );
@@ -150,7 +155,7 @@ pages.forEach((page) => {
 // API & ACTION ENDPOINTS
 // -----------------------------------------------------------------------------
 
-// SECRET ROUTE: For Hayden to create new gyms (e.g., /provision-gym?gymId=gym_002&gymName=Iron+House&username=admin_ironhouse)
+// Provision new gym accounts
 app.get(
   '/provision-gym',
   wrap(async (req, res) => {
@@ -160,13 +165,11 @@ app.get(
       return res.send('Missing parameters. Format: ?gymId=...&gymName=...&username=...');
     }
 
-    // 1. Create the blank gym
     await pool.query(
       'INSERT INTO gyms (id, name) VALUES ($1, $2) ON CONFLICT (id) DO NOTHING',
       [gymId, gymName]
     );
 
-    // 2. Create the admin with password '1234' and flag them for a reset
     const hash = await bcrypt.hash('1234', 10);
     await pool.query(
       `INSERT INTO admins (username, "passwordHash", "gymId", "requiresPasswordChange") 
@@ -188,9 +191,7 @@ app.post(
 
     if (admin && (await bcrypt.compare(password || '', admin.passwordHash))) {
       
-      // Check if they are a new gym needing a password reset
       if (admin.requiresPasswordChange) {
-        // Log them in temporarily but flag the session
         req.session.pendingAdmin = { id: admin.id, username: admin.username, gymId: admin.gymId };
         return res.send(`
           <div style="font-family: sans-serif; max-width: 400px; margin: 50px auto; text-align: center;">
@@ -203,7 +204,6 @@ app.post(
         `);
       }
 
-      // Normal login for existing users
       req.session.admin = { username: admin.username, gymId: admin.gymId };
       return res.redirect('/dashboard');
     }
@@ -222,10 +222,8 @@ app.post(
     const { newPassword } = req.body;
     const admin = req.session.pendingAdmin;
 
-    // Hash the new secure password
     const newHash = await bcrypt.hash(newPassword, 10);
 
-    // Update DB and remove the flag
     await pool.query(
       `UPDATE admins 
        SET "passwordHash" = $1, "requiresPasswordChange" = false 
@@ -233,11 +231,9 @@ app.post(
       [newHash, admin.id]
     );
 
-    // Upgrade their pending session to a real session
     req.session.admin = { username: admin.username, gymId: admin.gymId };
     delete req.session.pendingAdmin;
 
-    // Send them to their brand new, isolated dashboard
     res.redirect('/dashboard');
   })
 );
@@ -359,13 +355,12 @@ app.post('/api/plans', requireLogin, async (req, res) => {
 // MEMBER ENROLLMENT & MANAGEMENT ENDPOINTS
 // -----------------------------------------------------------------------------
 
-// Register new member
+// Register new member & attach subscription + sign-up fee with platform fee
 app.post('/create-subscription', requireLogin, async (req, res) => {
   const { paymentMethodId, email, fullName, phone, barcode, planId } = req.body;
   const gymId = req.session.admin.gymId;
 
   try {
-    // Pick the barcode first so we never create a Stripe customer for a duplicate
     let assignedBarcode = barcode;
     if (assignedBarcode) {
       const dup = await pool.query('SELECT 1 FROM members WHERE "gymId" = $1 AND barcode = $2', [
@@ -392,6 +387,7 @@ app.post('/create-subscription', requireLogin, async (req, res) => {
       }
     }
 
+    // 1. Create Customer in Stripe
     const customer = await stripe.customers.create({
       payment_method: paymentMethodId,
       email,
@@ -399,11 +395,64 @@ app.post('/create-subscription', requireLogin, async (req, res) => {
       invoice_settings: { default_payment_method: paymentMethodId },
     });
 
+    // 2. Attach Payment Method to Customer
+    await stripe.paymentMethods.attach(paymentMethodId, {
+      customer: customer.id,
+    });
+
+    let createdSubscriptionId = null;
+
+    // 3. Create Subscription in Stripe with Platform Fee Cut & One-time Sign-up Fee
+    if (planId) {
+      const planRes = await pool.query('SELECT * FROM plans WHERE id = $1 AND "gymId" = $2', [
+        planId,
+        gymId,
+      ]);
+
+      if (planRes.rows.length > 0 && planRes.rows[0].stripePriceId) {
+        const plan = planRes.rows[0];
+
+        // Fetch connected Stripe Account ID if the gym has one set
+        const gymRes = await pool.query('SELECT "stripeAccountId" FROM gyms WHERE id = $1', [gymId]);
+        const connectedAccountId = gymRes.rows[0]?.stripeAccountId;
+
+        // Build array for upfront fees (e.g., sign-up fee)
+        const addInvoiceItems = [];
+        if (plan.stripeSignupPriceId) {
+          addInvoiceItems.push({ price: plan.stripeSignupPriceId });
+        }
+
+        const subPayload = {
+          customer: customer.id,
+          items: [{ price: plan.stripePriceId }],
+          ...(addInvoiceItems.length > 0 && { add_invoice_items: addInvoiceItems }),
+          application_fee_percent: PLATFORM_FEE_PERCENT,
+          expand: ['latest_invoice.payment_intent'],
+        };
+
+        if (connectedAccountId) {
+          subPayload.transfer_data = { destination: connectedAccountId };
+        }
+
+        const subscription = await stripe.subscriptions.create(subPayload);
+        createdSubscriptionId = subscription.id;
+      }
+    }
+
     await pool.query(
       `INSERT INTO members
-        ("fullName", email, phone, barcode, status, "planId", "stripeCustomerId", "gymId")
-       VALUES ($1, $2, $3, $4, 'active', $5, $6, $7)`,
-      [fullName, email, phone || '', assignedBarcode, planId || null, customer.id, gymId]
+        ("fullName", email, phone, barcode, status, "planId", "stripeCustomerId", "stripeSubscriptionId", "gymId")
+       VALUES ($1, $2, $3, $4, 'active', $5, $6, $7, $8)`,
+      [
+        fullName,
+        email,
+        phone || '',
+        assignedBarcode,
+        planId || null,
+        customer.id,
+        createdSubscriptionId,
+        gymId,
+      ]
     );
 
     res.json({ success: true, barcode: assignedBarcode });
